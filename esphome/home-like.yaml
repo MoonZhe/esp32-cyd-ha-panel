@@ -57,6 +57,7 @@ substitutions:
   ROOM_NAME: "Bedroom"                             # room name shown in the top-right header
   TIME_24H: "true"                                 # true = 24h format, false = 12h format
   HA_BASE_URL: "http://homeassistant.local:8123"   # Home Assistant base URL, used to resolve entity_picture (relative path) into a full album-art URL
+  SPOTIFY_ART_CAMERA: "camera.spotify_album_art"   # Generic Camera whose still image is the Spotify cover; HA resizes it via camera_proxy?width=
 
   ## DIM settings
   AUTO_DIM: "true"                                 # true = enable auto dimming
@@ -649,6 +650,13 @@ time:
                 - script.execute: dim_display
 
 globals:
+  # True once the current track's cover has been downloaded - the overlay
+  # shows the placeholder until then.
+  - id: album_art_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
   # True while Home Assistant's API client is connected - drives the
   # Offline tile state in ui_refresh.
   - id: ha_connected
@@ -853,6 +861,8 @@ font:
     size: 16
     glyphs:
       - "\U000F01D8" # mdi:dots-horizontal
+      - "\U000F057E" # mdi:volume-high (Spotify volume indicator)
+      - "\U000F0581" # mdi:volume-off (Spotify muted indicator)
 
 http_request:
 
@@ -861,10 +871,21 @@ online_image:
     url: "https://via.placeholder.com/120x160"       # placeholder - real URL is set at runtime via set_url() (Task 2's tile6_entity_picture sensor)
     format: JPEG
     type: RGB565
-    resize: 120x160
+    resize: 160x160
+    # Default download buffer is 64 KB, reserved at boot - that alone left no
+    # contiguous block for the 29 KB decoded cover. HA serves ~3-7 KB JPEGs, and
+    # the buffer grows to the Content-Length if one is ever larger.
+    buffer_size: 8192
     on_download_finished:
+      - lambda: 'id(album_art_ready) = true;'
+      # The widget was created before any image existed (0x0), so point it
+      # at the image again to pick up the new size and pixels.
+      - lvgl.image.update:
+          id: spotify_overlay_art
+          src: tile6_album_art
       - script.execute: ui_refresh
     on_error:
+      - lambda: 'id(album_art_ready) = false;'
       - logger.log:
           format: "DIAG album art download failed - uptime=%u heap=%u"
           args: [ 'millis()', 'ESP.getFreeHeap()' ]
@@ -1360,25 +1381,27 @@ text_sensor:
     id: tile6_entity_picture
     entity_id: ${TILE6_ENTITY}
     attribute: entity_picture
+    # entity_picture changes on every track change (its cache= param), so this
+    # is the "new track" signal. The art itself comes from the camera below.
     on_value:
       then:
-        - lambda: |-
-            // Disabled for now: online_image always sizes its download buffer
-            // to the HTTP response's Content-Length when present (confirmed on
-            // real hardware - Spotify's ~250KB JPEG vs. ~64KB biggest free
-            // heap block, allocation fails every time). resize: only affects
-            // the decoded output, not the raw download buffer, so there's no
-            // config fix - would need a smaller source image (HA-side) or a
-            // different online_image download strategy. Left set_url() wired
-            // (harmless, doesn't fetch on its own) so this is a one-line
-            // re-enable (uncomment the update() call below) if either of
-            // those gets solved later.
-            std::string path = x;
-            if (!path.empty()) {
-              std::string full_url = std::string("${HA_BASE_URL}") + path;
-              id(tile6_album_art).set_url(full_url.c_str());
-              // id(tile6_album_art).update();
-            }
+        - script.execute: fetch_album_art
+
+  # Access token of the Generic Camera that mirrors the Spotify cover. It
+  # rotates every few minutes; we only need the current one when fetching.
+  # (The camera's own entity_picture can keep a stale entity_id after a
+  # rename, so the proxy path is built from the configured entity instead.)
+  - platform: homeassistant
+    id: album_art_camera_token
+    entity_id: ${SPOTIFY_ART_CAMERA}
+    attribute: access_token
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(album_art_ready);'
+            then:
+              - script.execute: fetch_album_art
 
 switch:
   - platform: restart
@@ -2324,6 +2347,38 @@ lvgl:
                             styles: style_value
                             long_mode: SCROLL_CIRCULAR
                             clickable: false
+                        # Corner dots: hold this tile for more options.
+                        - label:
+                            id: t6_hint
+                            align: TOP_RIGHT
+                            x: 4
+                            y: -4
+                            text: "\U000F01D8"
+                            text_font: mdi_small
+                            text_color: 0x7A7A7C
+                            clickable: false
+                        # Shown only while Spotify's volume is 0 (hold toggles it).
+                        - label:
+                            id: t6_mute
+                            align: TOP_RIGHT
+                            x: 2
+                            y: 14
+                            text: "\U000F0581"
+                            text_font: mdi_small
+                            text_color: 0x7A7A7C
+                            hidden: true
+                            clickable: false
+                      # Hold: mute if there's any volume, otherwise full volume.
+                      on_long_press:
+                        - script.execute: { id: publish_action, action: "tile6_long_press" }
+                        - homeassistant.service:
+                            service: media_player.volume_set
+                            data:
+                              entity_id: ${TILE6_ENTITY}
+                            data_template:
+                              volume_level: !lambda |-
+                                float v = id(tile6_volume).state;
+                                return std::string((!isnan(v) && v > 0.001f) ? "0.0" : "1.0");
                       on_short_click:
                         - script.execute: { id: publish_action, action: "tile6_press" }
                         - lvgl.widget.show: spotify_overlay
@@ -2653,18 +2708,6 @@ lvgl:
                       pad_bottom: 0
                       border_width: 0
                       widgets:
-                        - image:
-                            id: spotify_overlay_bg
-                            src: tile6_album_art
-                            x: 0
-                            y: 0
-                            width: ${DISPLAY_W}
-                            height: ${DISPLAY_H}
-                            clickable: true
-                            on_click:
-                              - delay: 100ms
-                              - lvgl.widget.hide: spotify_overlay
-
                         - obj:
                             id: spotify_overlay_dim
                             x: 0
@@ -2681,12 +2724,46 @@ lvgl:
                               - delay: 100ms
                               - lvgl.widget.hide: spotify_overlay
 
+                        # Placeholder while art loads or nothing is playing;
+                        # the cover image sits on top of it once downloaded.
+                        - obj:
+                            id: spotify_art_placeholder
+                            align: TOP_MID
+                            y: 16
+                            width: 160
+                            height: 160
+                            radius: 12
+                            bg_color: 0x1F2228
+                            bg_opa: COVER
+                            border_width: 0
+                            clickable: false
+                            scrollable: false
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "${MDI_GLYPH_6}"
+                                  text_font: materialdesign_icons
+                                  text_color: 0x5A5F68
+                                  clickable: false
+
+
+                        # Cover at its native 160x160 (what HA's camera proxy
+                        # returns) - no LVGL scaling, which redraws far too
+                        # slowly on this board.
+                        - image:
+                            id: spotify_overlay_art
+                            src: tile6_album_art
+                            align: TOP_MID
+                            y: 16
+                            hidden: true
+                            clickable: false
+
                         - label:
                             id: spotify_overlay_title
                             align: TOP_MID
-                            y: 90
+                            y: 184
                             width: !lambda "return ${DISPLAY_W} - 32;"
-                            height: 40
+                            height: 20
                             text_align: CENTER
                             text: "Nothing playing"
                             text_color: 0xFFFFFF
@@ -2696,9 +2773,9 @@ lvgl:
                         - label:
                             id: spotify_overlay_artist
                             align: TOP_MID
-                            y: 134
+                            y: 206
                             width: !lambda "return ${DISPLAY_W} - 32;"
-                            height: 32
+                            height: 18
                             text_align: CENTER
                             text: ""
                             text_color: 0xD9D9D9
@@ -2712,7 +2789,7 @@ lvgl:
                               bg_opa: 30%
                             align: BOTTOM_MID
                             x: -54
-                            y: -90
+                            y: -40
                             width: 36
                             height: 36
                             radius: 999
@@ -2740,7 +2817,7 @@ lvgl:
                             pressed:
                               bg_opa: 60%
                             align: BOTTOM_MID
-                            y: -90
+                            y: -40
                             width: 46
                             height: 46
                             radius: 999
@@ -2782,7 +2859,7 @@ lvgl:
                               bg_opa: 30%
                             align: BOTTOM_MID
                             x: 54
-                            y: -90
+                            y: -40
                             width: 36
                             height: 36
                             radius: 999
@@ -2804,6 +2881,16 @@ lvgl:
                                   text_color: 0xFFFFFF
                                   text: "${SPOTIFY_ICON_NEXT}"
                                   clickable: false
+
+                        - label:
+                            id: spotify_volume_icon
+                            align: BOTTOM_LEFT
+                            x: 6
+                            y: -21
+                            text: "\U000F057E"
+                            text_font: mdi_small
+                            text_color: 0xC8CBD2
+                            clickable: false
 
                         - slider:
                             id: spotify_overlay_volume
@@ -3875,6 +3962,24 @@ lvgl:
                       clickable: false
 
 script:
+  # Spotify's own cover is ~250 KB - bigger than the largest free heap block,
+  # and online_image buffers the whole download. Home Assistant's camera proxy
+  # scales the JPEG down server-side (width=120 -> ~160 px, ~10 KB), which fits.
+  - id: fetch_album_art
+    mode: restart
+    then:
+      - lambda: 'id(album_art_ready) = false;'
+      - script.execute: ui_refresh
+      # Give HA a moment to switch entity_picture to the new track.
+      - delay: 1s
+      - lambda: |-
+          std::string state = id(ha_state_tile6).state;
+          std::string token = id(album_art_camera_token).state;
+          if ((state != "playing" && state != "paused") || token.empty()) return;
+          std::string url = std::string("${HA_BASE_URL}/api/camera_proxy/${SPOTIFY_ART_CAMERA}?token=") + token + "&width=160&height=160";
+          id(tile6_album_art).set_url(url.c_str());
+          id(tile6_album_art).update();
+
   - id: wake_display
     mode: restart
     then:
@@ -5030,14 +5135,28 @@ script:
             if (!isnan(volume)) {
               lv_slider_set_value(id(spotify_overlay_volume), (int) lround(volume * 100.0f), LV_ANIM_OFF);
             }
+            bool muted = !isnan(volume) && volume < 0.005f;
+            set_lbl(id(spotify_volume_icon), muted ? std::string("\U000F0581") : std::string("\U000F057E"));
+            // Volume indicators only matter while something is actually playing.
+            if (muted && is_playing)
+              lv_obj_clear_flag(id(t6_mute), LV_OBJ_FLAG_HIDDEN);
+            else
+              lv_obj_add_flag(id(t6_mute), LV_OBJ_FLAG_HIDDEN);
+            if (is_playing)
+              lv_obj_clear_flag(id(spotify_volume_icon), LV_OBJ_FLAG_HIDDEN);
+            else
+              lv_obj_add_flag(id(spotify_volume_icon), LV_OBJ_FLAG_HIDDEN);
 
-            // Art fetching is disabled for now (see tile6_entity_picture's
-            // on_value lambda - real hardware memory blocker, not a bug in
-            // this hide/show logic). Always hidden, always falls back to the
-            // dim scrim's flat dark background. Once art fetching works
-            // again, this becomes: hidden when idle, shown when active
-            // (same spirit as the original design spec).
-            lv_obj_add_flag(id(spotify_overlay_bg), LV_OBJ_FLAG_HIDDEN);
+            // Cover replaces the placeholder once downloaded; the placeholder only
+            // shows while it loads or when nothing is playing.
+            bool show_art = spotify_active && id(album_art_ready);
+            if (show_art) {
+              lv_obj_clear_flag(id(spotify_overlay_art), LV_OBJ_FLAG_HIDDEN);
+              lv_obj_add_flag(id(spotify_art_placeholder), LV_OBJ_FLAG_HIDDEN);
+            } else {
+              lv_obj_add_flag(id(spotify_overlay_art), LV_OBJ_FLAG_HIDDEN);
+              lv_obj_clear_flag(id(spotify_art_placeholder), LV_OBJ_FLAG_HIDDEN);
+            }
           }
 
           if (id(active_control_kind) == "climate_temperature" && !lv_obj_has_flag(id(climate_detail_overlay), LV_OBJ_FLAG_HIDDEN)) {
@@ -5225,5 +5344,7 @@ script:
           lv_obj_set_style_text_color(id(t1_hint), lv_color_hex(offline ? 0x3A3E46 : (t1_on ? ${TILE1_VALUE_ACTIVE_COLOR} : ${TILE1_VALUE_DISABLED_COLOR})), 0);
           lv_obj_set_style_text_color(id(t2_hint), lv_color_hex(offline ? 0x3A3E46 : (t2_on ? ${TILE2_VALUE_ACTIVE_COLOR} : ${TILE2_VALUE_DISABLED_COLOR})), 0);
           lv_obj_set_style_text_color(id(t4_hint), lv_color_hex(offline ? 0x3A3E46 : (t4_on ? ${TILE4_VALUE_ACTIVE_COLOR} : ${TILE4_VALUE_DISABLED_COLOR})), 0);
+          lv_obj_set_style_text_color(id(t6_hint), lv_color_hex(offline ? 0x3A3E46 : (t6_on ? ${TILE6_VALUE_ACTIVE_COLOR} : ${TILE6_VALUE_DISABLED_COLOR})), 0);
+          lv_obj_set_style_text_color(id(t6_mute), lv_color_hex(t6_on ? ${TILE6_VALUE_ACTIVE_COLOR} : ${TILE6_VALUE_DISABLED_COLOR}), 0);
 
       - component.update: my_display

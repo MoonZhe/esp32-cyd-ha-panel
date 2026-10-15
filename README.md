@@ -16,8 +16,9 @@ into a dark, glanceable Home Assistant control panel for your desk.
 - **Hold for more**: tiles marked with `•••` open a picker or slider on long-press:
   brightness, colour and colour temperature, fan speed, cover position, a thermostat,
   or a custom list of actions with the current option highlighted.
-- **Spotify overlay**: track and artist (including Chinese titles), play/pause,
-  previous/next and volume.
+- **Spotify overlay**: album art, track and artist (including Chinese titles),
+  play/pause, previous/next and volume. Holding the Spotify tile toggles between
+  mute and full volume, with a muted indicator on the tile.
 - **Header**: large clock, room name and room temperature.
 - **Honest connection state**: Wi-Fi and Home Assistant icons appear only when a link
   is down, and every tile turns grey and reads "Offline" while Home Assistant is
@@ -53,6 +54,26 @@ into a dark, glanceable Home Assistant control panel for your desk.
    Home Assistant actions** under Settings → Devices & services → ESPHome →
    the device → Configure. Without it, taps can't control anything.
 
+### Album art (optional)
+
+Spotify's own cover is about 100–250 KB, more than this board can buffer. Instead,
+Home Assistant serves a scaled-down copy through a camera entity:
+
+1. Settings → Devices & services → **Add integration** → **Generic Camera**.
+2. **Still image URL** (use your own media player entity):
+   ```
+   http://127.0.0.1:8123{{ state_attr('media_player.spotify', 'entity_picture') or '/static/icons/favicon-192x192.png' }}
+   ```
+   Leave the stream source and credentials empty.
+3. Set it up **while Spotify is playing**. Home Assistant records the image type
+   from the preview, and it only resizes JPEGs; if you set it up while idle, open
+   the camera's options and save them again while something plays.
+4. Name the device so the entity is `camera.spotify_album_art`, or change
+   `SPOTIFY_ART_CAMERA` in the substitutions.
+
+The panel requests `camera_proxy/...?width=160`, which comes back as a ~3–7 KB,
+160×160 JPEG. If the camera doesn't exist, the overlay just shows a placeholder.
+
 ### Tiles in this config
 
 The included config is a real bedroom setup and is meant as a worked example:
@@ -60,7 +81,7 @@ Cozy / Bright / Call trigger lighting automations, Climate picks a mode from an
 `input_select`, Bedroom AC is a `climate` entity, and the last tile is Spotify.
 Tiles 1, 2 and 4 have custom long-press pickers (search the YAML for
 `cozy_scene_overlay`, `ceiling_light_overlay` and `hvac_mode_overlay`); point them
-at your own entities or remove them.
+at your own entities or remove them. Holding tile 6 toggles the Spotify volume.
 
 ## Credits
 
