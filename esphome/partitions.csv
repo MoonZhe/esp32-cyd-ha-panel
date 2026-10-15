@@ -1,0 +1,14 @@
+# ESP32-2432S028 (4MB flash), single app partition - no OTA.
+# Traded away wireless OTA for ~2x app flash headroom (needed for the
+# Chinese-glyph font subset); firmware updates go over USB from now on.
+#
+# `esphome upload` always writes the app image at the fixed 0x10000
+# offset, so the app partition MUST start there - data partitions go
+# after it, not before (a first attempt at putting nvs/phy_init before
+# the app moved it to 0x70000 and left the board unbootable).
+# Name,     Type, SubType,  Offset,   Size
+factory,    app,  factory,  0x10000,  0x370000
+nvs,        data, nvs,      0x380000, 0x60000
+phy_init,   data, phy,      0x3E0000, 0x1000
+eeprom,     data, 0x99,     0x3E1000, 0x1000
+spiffs,     data, spiffs,   0x3E2000, 0xF000
