@@ -1,9 +1,9 @@
 # CYD Home Assistant Panel
 
-An ESPHome + LVGL firmware that turns a $15 ESP32-2432S028 "Cheap Yellow Display"
+An ESPHome + LVGL firmware that turns an ESP32-2432S028 "Cheap Yellow Display"
 into a dark, glanceable Home Assistant control panel for your desk.
 
-![Panel preview: home screen, Spotify album art overlay, Climate hold-picker, and offline state](docs/preview.png)
+![Panel preview: home screen, Spotify album art overlay, Climate hold-picker, and offline state](docs/panel-preview.png)
 
 *Rendered from the firmware's own fonts, icons and layout values. The album cover shown is placeholder artwork.*
 
