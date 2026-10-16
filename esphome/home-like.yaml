@@ -601,6 +601,26 @@ wifi:
         args: [ 'millis()', 'ESP.getFreeHeap()' ]
 
 interval:
+  # online_image never times out a download whose connection drops midway
+  # (read() keeps returning 0 and it waits forever), and while it's stuck every
+  # later update is refused with "Image already being updated". Abort anything
+  # still running after 15 s and fetch again.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(tile6_album_art).is_decoding() &&
+                     millis() - id(album_art_fetch_started) > 15000;
+          then:
+            - logger.log:
+                level: WARN
+                format: "Album art download stalled - aborting and retrying"
+            - lambda: |-
+                id(tile6_album_art).release();
+                id(album_art_ready) = false;
+            - script.execute: fetch_album_art
+
   - interval: 1s
     then:
       - if:
@@ -650,6 +670,13 @@ time:
                 - script.execute: dim_display
 
 globals:
+  # millis() when the current album-art download started - lets the watchdog
+  # below spot a download that has stalled.
+  - id: album_art_fetch_started
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
   # True once the current track's cover has been downloaded - the overlay
   # shows the placeholder until then.
   - id: album_art_ready
@@ -4008,6 +4035,11 @@ script:
           std::string token = id(album_art_camera_token).state;
           if ((state != "playing" && state != "paused") || token.empty()) return;
           std::string url = std::string("${HA_BASE_URL}/api/camera_proxy/${SPOTIFY_ART_CAMERA}?token=") + token + "&width=160&height=160";
+          // A newer track wins over a download still in flight (which would
+          // otherwise make update() refuse with "already being updated").
+          if (id(tile6_album_art).is_decoding())
+            id(tile6_album_art).release();
+          id(album_art_fetch_started) = millis();
           id(tile6_album_art).set_url(url.c_str());
           id(tile6_album_art).update();
 
